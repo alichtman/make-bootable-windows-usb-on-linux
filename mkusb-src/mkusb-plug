@@ -1,0 +1,726 @@
+#!/bin/bash
+
+# Copyright (c) 2020
+# Nio Wiklund alias sudodus <nio dot wiklund at gmail dot com>
+# Thomas Schmitt <scdbackup@gmx.net>
+# Provided under GPL version 2 or later.
+
+# date        sign     comment
+#
+# 2019-12-23  sudodus  created GUI version 2; version 1 is text only)
+#                      using xorriso-dd-target, mkusb-minp, zenity, expect
+#                      plus standard tools in Ubuntu and Debian
+# 2019-12-27  sudodus  bugfixes for Debian in
+#                       ver_test_minp: sudo added
+#                       main: sudo added in 'test_tool sudo mkusb-minp'
+#                      get_target: new text 'Do you expect ...?'
+#                      main: added check for -h and -v
+#                      installer: added check for zenity and expect  
+# 2019-12-29  sudodus  feature to create usbdata partition
+#                      installer: added check for
+#                      nfts.vfat, nfts.exfat,nfts.ntfs
+# 2020-01-11  sudodus  test-tool: options 'exit' or 'warn'
+#                      usage: more details
+# 2020-01-17  sudodus  mkusb-minp forked to mkusb-sedd:
+#                      improved feedback during processing with dd and sed
+#                      installer:
+#                      added watch-flush to be installed and checked for
+# 2020-01-24  sudodus  installer: desktop similar to that of guidus
+#                      added mkusb-plug.desktop to be installed and checked
+# 2020-01-25  sudodus  mkusb-sedd: minor bugfixes
+# 2020-02-04  sudodus  mkusb-plug.desktop: uses shellscript 'plug-start'
+#                      which is added in 'installer' where also partprobe
+#                      is checked for to 'install parted' in debian live
+# 2020-02-11  sudodus  mkusb-sedd: sort output of lsblk to identify
+#                      'last partition' to work in Ubuntu 16.04.x LTS
+# 2020-02-13  sudodus  get_target: # repeat xorriso-dd-target '-with_sudo'
+#                      to give lsblk full capability with file systems
+#                      also with old versions now when the target is known
+#                      use xorriso-dd-target with -trust_lsblk_udev when
+#                      spawned via expect
+#                      test_host: check for dd version
+#                      with status=progress and check for lsblk
+# 2020-02-14  sudodus  installer: test_host improved, offers xorriso-dd-target
+# 2020-02-16  sudodus  main: blklist=$(sudo lsblk -lo ...), l (list) added
+# 2020-03-03  sudodus  mkusb-sedd: select label depending on Ubuntu version
+# 2020-03-20  sudodus  get_action: added action to make Windows installer
+# 2020-03-22  sudodus  mkusb-sedd and mkusb-tow:
+#                      several fixes to make things work in systems like
+#                      xubuntu focal, that automatically mounts partitions
+#                      that are created and after partprobe
+# 2020-05-03  sudodus  mkusb-sedd:
+#                      puer: relies on automatic creation of partition for
+#                      persistence by Ubuntu (faster and more robust now)
+#                      improved identification of version number
+#                      mkusb-sedd and mkusb-tow:
+#                      p_checkpoint: 'Are you sure?' added in text mode
+# 2020-05-28  sudodus  mkusb-tow: wf_cleanup: added umount after partprobe to
+#                      manage problems because of automount plus some cosmetics
+# 2020-09-23  sudodus  mkusb-sedd: puer, puer0: Workaround because of bug:
+#                      https://bugs.launchpad.net/bugs/1895329
+# 2020-10-03  sudodus  mkusb-sedd: puer: "might fail - continue anyway?"
+#                      when iso file not suitable Ubuntu version.
+# 2020-11-19  sudodus  mkusb-sedd: puer, puer0: Workaround reverted (bug-fix
+#                      for https://bugs.launchpad.net/bugs/1895329)
+#                      srctst: Cannot to create data partition for version 20.10
+# 2020-10-21  sudodus  mkusb-sedd: new functions gpt_fix, gpt_zap
+#                       datp: using gpt_fix, gpt_zap (and partprobe)
+#                      get_action and scrtst: no longer check to exclude 20.10    
+# 2021-07-28  sudodus  srctst: & mkusb-sedd: puer:
+#                      identify new versions of Ubuntu (.disk/info)
+#                      and a minor cosmetic tweak (zenity window size)
+# 2021-11-22  sudodus  quoted grep 'patterns'
+# 2022-04-11  sudodus  installer in tarball: install exfat-utils or exfatprogs
+
+version=2.8.7
+
+inversvid="\0033[7m"
+resetvid="\0033[0m"
+greenback="\0033[1;37;42m"
+blueback="\0033[1;37;44m"
+redback="\0033[1;37;41m"
+uver=
+pu=false
+pd=false
+persistent=false
+nopersist=false
+usbdata=false
+towindows=false
+ufs=
+
+progname="${0##*/}"
+source=
+target=
+manager=
+
+########################################################################
+
+function usage {
+
+echo "Tool to create boot drive, typically a live USB drive"
+echo "Usage:    $progname [source file]"
+echo "Examples:"
+echo "          $progname linux.iso           # make live drive"
+echo "          $progname linux.img           # clone image file"
+echo "          $progname ubuntu-19.10+.iso   # make persistent live"
+echo "          $progname debian-10+.iso      # make persistent live"
+echo "          $progname windows.iso         # make installer drive"
+echo "          $progname -v                  # version"
+echo "          $progname -h                  # help"
+exit 1
+}
+#######################################################################
+
+function p_zentest {
+
+zenity --info --title="$progname $version - zenity-test" --timeout 1 \
+ --width=350 --height=150 \
+--text="Checking if zenity works in this environment" > /dev/null 2>&1
+exitnr=$?
+if [ $exitnr -eq 0 ] || [ $exitnr -eq 5 ]
+then
+ manager=z
+else
+ return 1
+fi
+}
+########################################################################
+
+function test_tool {
+
+# test-tool [sudo] program-name
+
+if [ "$1" == "sudo" ]
+then
+ shift
+ sstr="s"
+ tmpstr=$(sudo which "$1")
+else
+ sstr=
+ tmpstr=$(which "$1")
+fi
+
+if [ "$tmpstr" == "" ]
+then
+ echo -e "$redback '$1' not in PATH $resetvid
+Please consider installing it and/or copy it into '/usr/local/${sstr}bin'
+maybe easiest to use the 'installer' that comes with the tarball."
+ if [ "$2" == "exit" ]
+ then
+  echo "Necessary tool - exit"
+  exit 1
+ else
+  read -sn1 -t3 -p "Optional tool - Press Enter to continue "
+  echo "
+----------------------------------------------------------------"
+ fi
+fi
+}
+########################################################################
+
+function ver_test_sedd {
+
+# preparing for mkusb-sedd
+
+vermin=2.8
+lng0=$LANG
+lca0=$LC_ALL
+LANG=C
+LC_ALL=C
+tmppat=$(sudo which mkusb-sedd)
+tmpstr=$(grep -m1 'version=' "$tmppat")
+if [ "${tmpstr}" == "" ]
+then
+ echo "${0##*/} needs mkusb-sedd but it is not found"
+ exit
+elif [ "${tmpstr}" \< "version=$vermin" ]
+then
+ o1=
+ echo -e "$redback Install mkusb-sedd version $vermin $resetvid"
+ exit 1
+fi
+LANG="$lng0"
+LC_ALL="$lca0"
+}
+########################################################################
+
+function test_host {
+
+LANG=C lsblk > /dev/null
+if [ $? -ne 0 ]
+then
+ echo -e "$redback This operating system is too old, there is no 'lsblk' $resetvid"
+ lsb_release -a 2> /dev/null
+ echo -e "$redback Try mkusb-bas $resetvid"
+ exit 1
+fi
+LANG=C dd --help|grep 'progress.*stat' > /dev/null
+if [ $? -ne 0 ]
+then
+ echo -e "$redback This operating system is too old for how '$progname' uses 'dd' $resetvid"
+ lsb_release -a 2> /dev/null
+ echo -e "$redback Try mkusb version 12 alias mkusb-dus or mkusb-minp $resetvid"
+ exit 1
+fi
+}
+########################################################################
+
+function p_cal1 {
+
+if [ "$USER" != "root" ]
+then
+ sudostr="live system or temporary superuser permissions"
+ for i in 1 2 3
+ do
+  if [ "$i" == "1" ]
+  then
+   sudo -n echo "$sudostr" 2> /dev/null
+  else
+   sudo -n echo "$sudostr" > /dev/null 2> /dev/null
+  fi
+  if [ $? -ne 0 ]
+  then
+   if [ "$1" == "-z" ]
+   then
+    zenity --password --title "$progname" \
+    --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+    2> /dev/null \
+    |sudo -S echo "$sudostr" 2> /dev/null
+   elif [ "$1" == "-d" ]
+   then
+    echo "o/ dialog"
+    ans=$(dialog --backtitle "$version - enter password" \
+    --insecure --passwordbox "Enter (sudo) password" 0 0 \
+    3>&1 1>&2 2>&3 3>&-)
+    echo "$ans" \
+    |sudo -S echo "$sudostr" 2> /dev/null
+   else
+#   3 attempts to enter password built into standard sudo
+    sudo echo "$sudostr" 2> /dev/null
+    if [ $? -ne 0 ]
+    then
+     exit
+    fi
+   fi
+  fi
+ done
+
+ if [ $? -ne 0 ]
+ then
+  echo "${0##*/}: bad sudo password"
+  exit
+ fi
+fi
+}
+########################################################################
+
+function get_action {
+
+while [ "$ans" == "" ]
+do
+ ans=$(zenity --list \
+  --width=$((720)) --height=$((300)) \
+  --title="$progname $version - create a boot drive" \
+  --text="Select what drive to make" \
+  --cancel-label="Quit" \
+  --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+  --column="hotkey" --column="kind of drive" \
+  c "Cloned drive - the standard" \
+  l "Live drive with 'usbdata' partition" \
+  n "No-persistent live drive" \
+  p "Persistent live drive" \
+  w "Windows installer" \
+  q "Quit" \
+  2> /dev/null)
+ ans=${ans:0:1}
+
+# read -p "Select Cloning, No-persistent, Persistent live or Quit (c/n/p/q) " ans
+ if [ "${ans}" == "c" ]
+ then
+  echo "--cloner"
+ elif [ "${ans}" == "l" ]
+ then
+  usbdata=true
+  echo "--{vfat|exfat|ntfs}"
+ elif [ "${ans}" == "n" ]
+ then
+  nopersist=true
+  echo "--nper"
+ elif [ "${ans}" == "p" ]
+ then
+  persistent=true
+  echo "--{puer|pder}"
+ elif [ "${ans}" == "w" ]
+ then
+  towindows=true
+  echo "-tow"
+ elif [ "${ans}" == "q" ] || [ "${ans}" == "" ]
+ then
+  echo -e "$redback terminated by user $resetvid"
+  exit
+ else
+  ans=
+ fi
+done
+
+if $persistent || $nopersist
+then
+ echo '*** srctst ***' # test the source file
+ srctst
+elif $usbdata
+then
+ echo '*** usbfs ***' # select file system for usbdata
+ usbfs
+fi
+}
+########################################################################
+
+function usbfs {
+
+ans=$(zenity --list \
+ --width=$((720)) --height=$((300)) \
+ --title="$progname $version - create a boot drive" \
+ --text="Select file system for 'usbdata' partition" \
+ --cancel-label="Quit" \
+ --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+ --column="hotkey" --column="file system" \
+ n "NTFS  - default" \
+ e "exFAT" \
+ f "FAT32" \
+ 2> /dev/null)
+ans=${ans:0:1}
+
+if [ "${ans}" == "e" ]
+then
+ ufs="exfat"
+elif [ "${ans}" == "f" ]
+then
+ ufs="vfat"
+else
+ ufs="ntfs"
+fi
+}
+########################################################################
+function get_source {
+
+if [ $# -eq 1 ] && [ "$1" != "" ]
+then
+ if [ "$1" == "-h" ]
+ then
+  usage '-h'
+ elif test -s "$1"
+ then
+  source="$1"
+ else
+  echo -e "$redback No useful source file $resetvid"
+  usage
+ fi 
+elif [ $# -le 1 ]
+then
+ source=$(/usr/bin/zenity --file-selection \
+ --title="$progname $version - select source file" \
+ --width=720 --height=300 \
+ --filename="$choice" --file-filter={*.i[sm][og]*,*.iso,*.img} \
+  2> /dev/null)
+else
+ usage
+fi
+
+if test -s "$source"
+then
+ echo "source file: '$source'"
+else
+ echo -e "$redback No useful source file $resetvid"
+ usage
+fi
+}
+########################################################################
+
+function get_target {
+
+# xorriso-dd-target [-with_sudo] -plug_test, -list_long, -look_for_iso
+
+ans=
+ans=$(zenity --list \
+  --width=$((720)) --height=$((300)) \
+  --title="$progname $version - what target drive is it? " \
+  --text="Do you expect the drive to contain <b>filesystems other than VFAT and ISO 9660</b>?" \
+  --cancel-label="Quit" \
+  --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+  --column="hotkey" --column="Alternatives" \
+  y "Yes" \
+  n "No" \
+  D "I don't know" \
+  2> /dev/null)
+ans=${ans:0:1}
+  
+#  echo "ans=$ans"
+#read -p "Do you expect the drive to contain filesystems other than VFAT and ISO 9660?
+#Answer Yes or No or Dunno (y/n/D) " ans
+if [ "${ans}" != "n" ]
+then
+an2=$(zenity --list \
+  --width=$((720)) --height=$((300)) \
+  --title="$progname $version - what target drive is it? " \
+  --text="Do you expect the drive to contain an ISO 9660 filesystem?" \
+  --cancel-label="Quit" \
+  --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+  --column="hotkey" --column="Alternatives" \
+  y "Yes" \
+  n "No" \
+  d "I don't know" \
+  q "Quit - default" \
+  2> /dev/null)
+an2=${an2:0:1}
+#  read -p "Do you expect the drive to contain an ISO 9660 filesystem?
+#Answer Yes or No or Dunno or Quit (y/n/d/q) " an2
+  if [ "${an2}" == "y" ]
+  then
+    tmpstr="-look_for_iso"
+  elif [ "${an2}" == "q" ] || [ "${an2}" == "" ]
+  then
+    echo -e "$redback terminated by user $resetvid"
+    exit 1
+  else
+    tmpstr=
+  fi
+else
+  tmpstr=
+fi
+
+tmpfil=$(mktemp)
+
+#-----------------------------------------------------------------------
+
+/usr/bin/expect << EOX
+ 
+set timeout -1
+
+spawn bash -c "xorriso-dd-target -plug_test -trust_lsblk_udev $tmpstr | tee $tmpfil"
+
+expect "Step 1:*\r"
+system  /usr/bin/zenity --info \
+ --title="$progname $version - step 1" \
+ --width=720 --height=300 \
+ --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+ --text="Attempt to find the desired device \
+by watching it appear after being plugged in\n\n\
+Step 1:\n\n\
+Please make sure that the desired target device is plugged <b>out</b> now.\n\
+If it is currently plugged in, make sure to <b>unmount</b> all its fileystems\n\
+and then <b>unplug</b> it.\n\n\
+Press the Enter key when ready." \
+ 2> /dev/null
+send -- " \r"
+
+expect "Step 2:*\r"
+system  /usr/bin/zenity --info \
+ --title="$progname $version - step 2" \
+ --width=720 --height=180 \
+ --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+ --text="Step 2:\n\n\
+Please <b>plug in</b> the desired target device and then press the Enter key" \
+ 2> /dev/null
+send -- " \r"
+
+expect eof
+EOX
+#-----------------------------------------------------------------------
+
+targ0=$(cat "$tmpfil")
+
+# repeat xorriso-dd-target '-with_sudo' to give lsblk full capability
+# with file systems also with old versions now when the target is known
+
+echo "Repeating test of target device with elevated permissions:"
+targ1="${targ0%% *}"
+targ0=$(xorriso-dd-target -with_sudo -with_vendor_model $tmpstr "$targ1")
+target="/dev/${targ0%% *}"
+
+if test -b "$target"
+then
+ echo "target device: $target"
+ tmp1="${targ0/:*YES*:}"
+ if [ "$tmp1" != "$targ0" ]
+ then
+  echo -e "$blueback $targ0 $resetvid"
+ else
+  echo -e "$redback $targ0 $resetvid"
+  targ0="<span fgcolor='#cc0000'>$targ0</span>"
+ fi
+ rm "$tmpfil"
+else
+ echo "$targ0"
+ echo -e "$redback No useful target device $resetvid"
+ rm "$tmpfil"
+ exit 1
+fi
+}
+########################################################################
+
+srctst () {
+
+# checking the source file
+
+verfail=false
+lp1=$(mktemp -d)
+
+sudo mount -o loop "$source" "$lp1"
+if [ $? -ne 0 ]
+then
+ verfail=true
+ /bin/echo -e "$redback Loop mount of source file failed $resetvid"
+ exit 1
+else
+ grep -i DISKNAME "$lp1/README.diskdefines" 2> /dev/null |grep buntu
+ if [ $? -ne 0 ]
+ then
+  uver=$(grep -om1 '[1-9][0-9]\.[01][04]' "$lp1/.disk/info")
+ fi
+ if [ $? -eq 0 ] || [ "$uver" != "" ]
+ then
+  pu=true
+  uver=$(grep 'DISKNAME' "$lp1/README.diskdefines"|grep 'buntu'|tr -s ' ' '\t'|cut -f 4)
+  if [ "$uver" = "" ]
+  then
+   uver=$(grep -om1 '[1-9][0-9]\.[01][04]' "$lp1/.disk/info")
+  fi
+#  if $usbdata && [ "$uver" == "20.10" ]
+#  then
+#   /bin/echo -e "$redback Cannot to create data partition for Ubuntu version $uver $resetvid"
+#   /bin/echo -e "$redback Try with mkusb-dus, and it you wish, change file system $resetvid"
+#   sudo umount "$lp1"
+#   rmdir "$lp1"
+#   exit
+#  fi
+  if [ $? -ne 0 ]
+  then
+   verfail=true
+   echo "*** Not Ubuntu or an Ubuntu family flavour ***"
+  else
+   /bin/echo -e "$blueback Ubuntu or an Ubuntu family flavour $resetvid"
+#   echo "$uver"
+   if [ "$uver" = "" ]
+   then
+    verfail=true
+    echo "*** Ubuntu version not found ***"  
+   elif test "$uver" \< "19.10"
+   then
+    verfail=true
+    echo "*** Ubuntu version $uver ***"
+   fi
+  fi
+ fi
+
+ grep -i 'debian' "$lp1/.disk/info" 2> /dev/null
+ if [ $? -eq 0 ]
+ then
+  pd=true
+  uver=$(< "$lp1/.disk/info" tr -s ' ' '\t'|grep -om1 '[0-9]*'|head -n1)
+  if [ $? -ne 0 ]
+  then
+   verfail=true
+   echo "*** Not a Debian version for persistence ***"
+  else
+   /bin/echo -e "$blueback Debian $resetvid"
+   echo "$uver"
+   if test "$uver" = ""
+   then
+    verfail=true
+    echo "*** Debian version for persistence not found ***"  
+   elif $(echo "$uver" |grep -v '[0-9]*')
+   then
+    verfail=true
+    echo "*** Debian version for persistence not found ***"  
+   elif [ "$uver" -lt "10" ]
+   then
+    verfail=true
+    echo "*** Debian version $uver ***"
+   fi
+  fi
+ fi
+fi
+
+ans2="y"
+if  ! $pu
+then
+  if  ! $pd
+  then
+   /bin/echo -e "$inversvid ***** Neither Ubuntu nor Debian ***** $resetvid"
+   read -p "Try persistence according to Ubuntu or Debian or live-only? (u/d/L)? " ans1
+   if [ "$ans1" = "u" ]
+   then
+     pu=true
+     verfail=true
+   elif [ "$ans1" = "d" ]
+   then
+     pd=true
+     verfail=true
+   else
+     /bin/echo -e "$blueback ${0##*/} can *clone* from $resetvid
+$blueback $source $resetvid"
+     ans2="n"
+     read -p "Do you want to continue? (y/N) " ans2
+     verfail=false
+     persistent=false
+   fi 
+  fi
+fi
+
+if $verfail
+then
+ /bin/echo -e "$redback ${0##*/} might fail to create a persistent live drive $resetvid
+$redback from $source $resetvid
+$redback You can try with regular mkusb $resetvid"
+ ans2="n"
+ read -p "Do you want to continue anyway? (y/N) " ans2
+fi
+
+sudo umount "$lp1"
+rmdir "$lp1"
+if [ "$ans2" != "y" ]
+then
+ exit
+fi
+
+if $persistent
+then
+ /bin/echo -e "$blueback Making persistent live drive of version $uver $resetvid"
+elif $nopersist
+then
+ /bin/echo -e "$blueback Making live-only drive of version $uver $resetvid"
+fi
+echo "$bar"
+
+#exit
+
+}
+########################################################################
+
+#  main
+
+########################################################################
+
+if [ "$1" == "-v" ]
+then
+ echo "$progname $version"
+ exit
+elif [ "$1" == "-h" ]
+then
+ usage
+fi
+
+test_host
+
+p_zentest
+if [ $? -ne 0 ]
+then
+ echo -e "$redback $progname needs a graphical user interface and the program 'zenity' $resetvid"
+ exit 1
+fi
+p_cal1 "-z"
+test_tool xorriso-dd-target exit
+test_tool sudo mkusb-sedd exit
+test_tool sudo mkfs.vfat warn
+test_tool sudo mkfs.exfat warn
+test_tool sudo mkfs.ntfs warn
+test_tool expect exit
+ver_test_sedd
+get_source "$@"
+get_action
+get_target
+
+#echo "sudo mkusb-sedd  --action  '$source' $target"
+
+blklist=$(sudo lsblk -lo MODEL,NAME,FSTYPE,LABEL,SIZE "$target")
+
+zenity --question \
+ --title="$progname $version - look carefully" \
+ --width=960 --height=480 \
+ --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+ --text="Target device '$target'
+
+$targ0
+<tt>
+$blklist
+</tt>
+Look carefully at the description of the target device!
+
+Do you want to start writing?" \
+ 2> /dev/null
+ 
+if [ $? -eq 0 ]
+then
+ ans3=yes
+fi
+#echo -e "$inversvid Look carefully at the description of the target device $resetvid"
+#ans3="n"
+#read -p "Do you want to start writing? (yes/No) " ans3
+
+if test "$ans3" = "yes"
+then
+ if $pd && $persistent
+ then
+#  echo "action=pder"
+  sudo mkusb-sedd --pder "$source" "$target"
+ elif $pu && $persistent
+ then
+#  echo "action=puer"
+  sudo mkusb-sedd --puer "$source" "$target"
+ elif $pu && $nopersist
+ then
+#  echo "action=nper"
+  sudo mkusb-sedd --nper "$source" "$target"
+ elif $usbdata
+ then
+#  echo "action=$ufs"
+  sudo mkusb-sedd --"$ufs" "$source" "$target"
+ elif $towindows
+ then
+  echo "action=tow"
+  sudo mkusb-tow "$source" "$target"
+ else
+#  echo "action=cloner"
+  sudo mkusb-sedd --cloner "$source" "$target"
+ fi
+fi

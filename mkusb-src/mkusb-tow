@@ -1,0 +1,446 @@
+#!/bin/bash
+
+#!/bin/bash
+
+# Copyright (c) 2020
+# Nio Wiklund alias sudodus <nio dot wiklund at gmail dot com>
+# Thomas Schmitt <scdbackup@gmx.net>
+# Provided under GPL version 2 or later.
+
+# date        sign     comment
+#
+# 2020-03-20  sudodus  created from help.ubuntu.com/community/Installation/
+#                      iso2usb/diy/windows-installer-for-big-files
+# 2020-03-21  sudodus  main: fixed buggy command for targsiz
+#                      wf_cleanup: made to work correctly for text mode
+# 2020-03-21  sudodus  several minor bugfixes after testing in xubuntu focal
+# 2020-05-03  sudodus  p_checkpoint: 'Are you sure?' added in text mode
+# 2020-05-28  sudodus  wf_cleanup: added umount after partprobe to manage
+#                      problems because of automount (e.g. in Xubuntu),
+#                      plus some cosmetics
+
+version=2.8.0
+
+progname="${0##*/}"
+inversvid="\0033[7m"
+faintvid="\0033[2m"
+resetvid="\0033[0m"
+greenback="\0033[1;37;42m"
+blueback="\0033[1;37;44m"
+redback="\0033[1;37;41m"
+safetybelt="$progname makes it safer to create a boot drive"
+safetybelt="$inversvid------------- $safetybelt -------------$resetvid"
+source=
+target=
+pid0=
+pid1=
+pimsiz=
+targsiz=
+size=
+success=true
+manager=
+bar="--------------------------------------------------------------------------------"
+
+########################################################################
+
+function doer {
+
+umount "$target"*
+df | grep "$target"
+if [ $? -eq 0 ]
+then
+ echo -e "$redback cloner: could not unmount a partition on the target device $resetvid"
+ exit
+fi
+
+echo "$bar"
+echo "extracting the partition table with grub ..."
+size="$pimsiz"
+wf_prep
+xz_do /usr/share/mkusb/grub-win-ntfs-install.img.xz
+wf_cleanup
+
+# mountpoints
+
+lp1=$(mktemp -d)
+sd1=$(mktemp -d)
+sd2=$(mktemp -d)
+echo "mount source file ..."
+mount -o loop "$source" "$lp1"
+
+partn1=/dev/$(lsblk -lno name "${target}" | sort | tail -n2 | head -n1)
+if ! test -b "$partn1"
+then
+ echo "The target's partition $partn1 not found"
+ exit
+fi
+partn2=/dev/$(lsblk -lno name "${target}" | sort | tail -n1)
+if ! test -b "$partn2"
+then
+ echo "The target's partition $partn2 not found"
+ exit
+fi
+echo "mount target partition 1 ..."
+mount "$partn1" "$sd1"
+#echo "lsblk -fm"
+#lsblk -fm
+#echo "---------------"
+#echo "work with bash (and exit) ..."
+#bash
+echo "mount target partition 2 ..."
+mount "$partn2" "$sd2"
+
+# extract from the windows.iso file with rsync
+
+size=$(wc -c "$source")
+size=${size%% *}
+echo "iso file size (bytes) = $size"
+wf_prep
+
+echo "extracting to FAT partition ..."
+sudo rsync -r --info=progress2 --exclude=sources "$lp1"/ "$sd1"
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+sudo mkdir "$sd1"/sources
+sudo rsync -r --info=progress2 "$lp1"/sources/boot.wim "$sd1"/sources
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+echo "extracting to NTFS partition ..."
+sudo rsync -a --info=progress2 "$lp1"/ "$sd2"
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+
+sync
+umount "$lp1" "$sd1" "$sd2"
+rm -r  "$lp1" "$sd1" "$sd2"
+
+wf_cleanup
+}
+########################################################################
+
+function wf_prep {
+
+tailfile=$(mktemp)
+if [ "$manager" == "z" ]
+then
+ ( watch-flush "$size" "$tailfile" > /dev/null ) & pid0=$!
+
+ ( tail -f "$tailfile"| zenity --progress --title="$version - progress ..." \
+ --width=500 --height=400 \
+ --percentage=0 --auto-close --no-cancel \
+ --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png"  2>> "/dev/null") & pid1=$!
+else
+ watch-flush "$size" "$tailfile" & pid0=$!
+fi
+}
+#############################################################################################################################
+
+function xz_do {
+
+echo "size to extract (bytes) = $size"
+
+which pv > /dev/null
+if [ $? -eq 0 ]
+then
+# pv "$1" | xzcat > "$target"
+ < "$1" xzcat | pv -s $size > "$target"
+else
+ < "$1" xzcat > "$target"
+fi
+
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+}
+########################################################################
+
+function wf_cleanup {
+
+echo -en "$faintvid"
+if [ "$manager" != "z" ]
+then
+ echo ""
+fi
+echo "----- cleanup after writing ------------------------------------------"
+sync
+echo "100
+# buffered data : 0 kB -- watching -- rate : 0 -- eta : n.a." >> "$tailfile"
+sleep 5.5
+ps -A|grep "^ *$pid0"
+if [ $? -eq 0 ]
+then
+ kill "$pid0"
+fi
+if [ "$manager" == "z" ]
+then
+ ps -A|grep "^ *$pid1"
+ if [ $? -eq 0 ]
+ then
+  kill "$pid1"
+ fi
+fi
+rm  "$tailfile"
+sleep 2
+partprobe
+sleep 4
+umount "$target"*
+echo -en "$resetvid"
+}
+###################
+
+function p_checkpoint {
+
+# $text string with high-lights
+
+ ans=
+ q_chk="Final checkpoint, go ahead?"
+ q_ch2="Final checkpoint:
+are you ready?"
+  
+ echo -e "$1"
+ action="${1/\\*7m}"
+ action="${action/\\*0m}"
+ action=$(echo "$action"|sed "s#^'/.*/#'#")
+ tolist=$(lsblk -lo MODEL,NAME,FSTYPE,LABEL,SIZE "$target")
+ <<<"$tolist" head -n2
+ <<<"$tolist" tail -n+3 | sort
+ trgtxt=$(lsblk -o NAME,SIZE,MODEL -d "$target")
+ trgtx1=$(echo "$trgtxt"|head -n1)
+ trgtx2=$(echo "$trgtxt"|tail -n1)
+ trgtxt="${trgtxt,,}"
+ if [ "$manager" == "z" ]
+ then
+  ans=$(zenity --list --radiolist \
+  --width=$(($wadd+780)) --height=$(($hadd+320)) \
+  --title="$version  Make Windows installer - $q_chk" \
+  --cancel-label="Stop" --ok-label="Go" \
+  --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+  --column="Go/Stop" --column="$action" --column="$trgtxt"\
+  true Stop "No, I am not sure yet" \
+  false Go  "Yes, I want to go ahead" \
+  2> /dev/null)
+  if [ $? -ne 0 ]
+  then
+   ans=n
+  fi
+ elif [ "$manager" == "d" ]
+ then
+  action="$trgtx1\n$trgtx2\n$action\n\Z1***** $q_chk *****\Zn"
+  ans=$(dialog --no-collapse \
+ --backtitle "$version - $q_chk" \
+ --cancel-label "Stop" --ok-label "Go" --colors \
+ --defaultno \
+ --radiolist "$action" 0 0 0 \
+ Stop "\Z1No, I am not sure yet\Zn" on \
+ Go   "Yes, I want to go ahead" off \
+ 3>&1 1>&2 2>&3 3>&-)
+  if [ $? -ne 0 ]
+  then
+   ans=n
+  fi
+ else
+  echo -en "$redback $q_chk (g/N) $resetvid"
+  read ans
+  if [ "$ans" == "g" ]
+  then
+   echo -en "$redback Are you sure ? (y/N) $resetvid"
+   read an2
+   if [ "$an2" != "y" ]
+   then
+    return 1
+   fi
+  fi
+ fi
+ 
+ if [ "$ans" == "Go" ]
+ then
+  ans=g
+ elif [ "$ans" == "Stop" ]
+ then
+  ans=n
+ fi
+ if [ "$ans" == "g" ]
+ then
+  return 0
+ else
+  if [ "$manager" == "z" ]
+  then
+   src_orig=
+  fi
+  return 1
+ fi
+}
+#######################################################################
+
+function p_zentest {
+
+zenity --info --title="$version - zenity-test" --timeout 1 \
+ --width=350 --height=150 \
+--text="Checking if zenity works in this environment" > /dev/null 2>&1
+exitnr=$?
+if [ $exitnr -eq 0 ] || [ $exitnr -eq 5 ]
+then
+ manager=z
+else
+ return 1
+fi
+}
+########################################################################
+
+function test_host {
+
+LANG=C lsblk > /dev/null
+if [ $? -ne 0 ]
+then
+ echo -e "$redback This operating system is too old, there is no 'lsblk' $resetvid"
+ lsb_release -a 2> /dev/null
+ echo -e "$redback Try mkusb-bas $resetvid"
+ exit 1
+fi
+LANG=C dd --help|grep 'progress.*stat' > /dev/null
+if [ $? -ne 0 ]
+then
+ echo -e "$redback This operating system is too old for how '$progname' uses 'dd' $resetvid"
+ lsb_release -a 2> /dev/null
+ echo -e "$redback Try mkusb version 12 alias mkusb-dus or mkusb-minp $resetvid"
+ exit 1
+fi
+}
+########################################################################
+
+function final_tasks {
+
+sleep 2
+sync
+ 
+if [ "${target/mmc}" != "$target" ]
+then
+ read -p "Press Enter to continue, when you have unplugged the target device '$target'
+and maybe have plugged it back again"
+fi
+sleep 2
+partprobe 2> /dev/null
+sleep 4
+umount "$target"* 2> /dev/null
+sleep 2
+echo "$bar"
+tolist=$(lsblk -lo NAME,MODEL,FSTYPE,LABEL,MOUNTPOINT,SIZE,NAME "$target")
+<<<"$tolist" head -n2
+<<<"$tolist" tail -n+3 | sort
+if $success
+then
+ /bin/echo -e "$greenback Done :-) $resetvid"
+else
+ /bin/echo -e "$redback failed :-( $resetvid"
+fi
+}
+########################################################################
+
+function usage {
+
+ /bin/echo -e "$safetybelt"
+ echo "From Windows iso file create installer in e.g. USB pendrive or memory card"
+ which pv > /dev/null
+ if [ $? -ne 0 ]
+ then
+  echo "You may want to install 'pv' (progress view)"
+ fi
+ echo "Usage:"
+ /bin/echo -e "$inversvid sudo /path/${0##*/} <source file> <target device> $resetvid"
+ echo Example:
+ echo " sudo $progname windows.iso /dev/sdx"
+ echo "Help:"
+ echo "$progname -h"
+ echo "Version:"
+ echo "$progname -v"
+ /bin/echo -e "${inversvid}Available devices $resetvid"
+ lsblk -do name,size,tran,model | \
+  grep -v -e 'sr[0-9]' -e 'fd[0-9]' -e 'zram[0-9]' -e 'loop[0-9]'
+ exit
+}
+########################################################################
+
+# main
+
+########################################################################
+
+# print version and help text on demand
+
+if [ "$1" == "-v" ]
+then
+ echo "$progname version $version"
+ exit
+elif [ "$1" == "-h" ]
+then
+ usage
+elif [ "$(whoami)" != "root" ]
+then
+ /bin/echo -e "$redback Run '${0##*/}' with sudo or as root $resetvid"
+ usage
+fi 
+
+test_host
+
+source="$1"
+target="$2"
+echo -e "$inversvid    ${0##*/}: Make Windows installer $resetvid"
+echo "  source file: '$source'"
+echo "target device: '$target'"
+version="$progname $version"
+
+# check target device and source file
+if [ $# -ne 2 ]
+then
+   /bin/echo -e "$redback There should be 2 parameters: 'source file' and 'target device' $resetvid"
+  usage
+fi
+if test -b "$target"
+then
+  leng=${#target}
+  leng1=$((leng - 1))
+  trunk=${target:0:leng1}
+  leng2=$((leng - 2))
+  trun2=${target:0:leng2}
+ else
+  /bin/echo -e "$redback Bad target device $inversvid $target $resetvid"
+  usage
+fi
+if ! test -s "$source"
+then
+  /bin/echo -e "$redback Bad source file $inversvid $source $resetvid"
+  usage
+elif ! test -s /usr/share/mkusb/grub-win-ntfs-install.img.xz
+then
+  /bin/echo -e "$redback No image $inversvid /usr/share/mkusb/grub-win-ntfs-install.img.xz $resetvid"
+  echo "this file should come with the installation of '$progname'"
+  exit 1
+elif ! test -b "$target" || test -b "$trunk" || test -b "$trun2" 
+then
+  /bin/echo -e "$redback Bad target device $inversvid $target $resetvid"
+  usage
+fi
+pimsiz=$(xz --robot --list /usr/share/mkusb/grub-win-ntfs-install.img.xz | tail -n1 | cut -f 5)
+targsiz=$(lsblk -bdno size "$target")
+if [ $pimsiz -gt $targsiz ]
+then
+  /bin/echo -e "$redback too small target device $resetvid"
+  echo "You need a drive with nominally 8 GB, more than $pimsiz bytes"
+  exit 1
+fi
+p_zentest
+p_checkpoint
+if [ $? -eq 0 ]
+then
+  doer
+  final_tasks
+else
+  echo -e "$redback ${0##*/} terminated by user $resetvid"
+  exit 1
+fi

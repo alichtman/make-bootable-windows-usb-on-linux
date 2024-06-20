@@ -1,0 +1,153 @@
+#!/bin/bash
+
+progname="mkusb-plug"
+
+########################################################################
+
+function test_host {
+
+LANG=C lsblk > /dev/null
+if [ $? -ne 0 ]
+then
+ echo "
+*** This operating system is too old, there is no 'lsblk' ***
+"
+ lsb_release -a 2> /dev/null
+ echo "
+Try mkusb-bas"
+ exit 1
+fi
+LANG=C dd --help|grep 'progress.*stat' > /dev/null
+if [ $? -ne 0 ]
+then
+ echo "*** This operating system is too old for how '$progname' uses 'dd' ***"
+ lsb_release -a 2> /dev/null
+ echo "- If you want to create a persistent live drive, try
+ - mkusb version 12 alias mkusb-dus: with or without a GUI
+ - mkusb-minp: text mode and persistence for Ubuntu 19.10+ and Debian 10+
+  These programs must be installed from separate sources.
+- If you want to use the plug-in method, try
+ - xorriso-dd-target: text mode, cloning, tips:
+   xorriso-dd-target -help | less
+   xorriso-dd-target -with_sudo -plug_test
+   xorriso-dd-target -with_sudo -plug_test -look_for_iso
+   xorriso-dd-target -with_sudo -plug_test -image_file mini.iso -dummy_force
+   xorriso-dd-target -with_sudo -plug_test -look_for_iso -image_file mini.iso -dummy_force
+- If the operating system is too old, you may have to
+ - unmount the partitions on the target drive manually
+ - override the warnings and copy & paste the suggested command lines
+  because lsblk does not provide the all info that xorriso-dd-target wants.
+"
+ read -p "Do you want to install 'xorriso-dd-target' from this tarball? (y/N) " ans
+ if [ "$ans" == "y" ]
+ then
+  cp -iv xorriso-dd-target /usr/local/bin
+ fi
+ exit 1
+fi
+}
+########################################################################
+# main
+########################################################################
+
+if [ "$(whoami)" != "root" ]
+then
+ echo "run as root or with sudo"
+ exit 1
+fi
+if [ $# -eq 0 ]
+then
+ echo "Usage: sudo $0 i  # install mkusb-plug"
+ echo "       sudo $0 r  # remove  mkusb-plug"
+ exit
+elif [ "$1" == "i" ] || [ "$1" == "-i" ]
+then
+ test_host
+ echo "installing mkusb-plug ..."
+ cp -iv mkusb-plug xorriso-dd-target watch-flush /usr/local/bin
+ cp -iv mkusb-sedd mkusb-tow /usr/local/sbin
+ mkdir -p /usr/share/icons/hicolor/48x48/apps/
+ cp -iv mkusb.png /usr/share/icons/hicolor/48x48/apps/
+ mkdir -p /usr/share/mkusb
+ cp -iv plug-start grub-win-ntfs-install.img.xz /usr/share/mkusb
+ mkdir -p /usr/share/applications
+ cp -iv mkusb-plug.desktop /usr/share/applications
+
+ tmpstr=$(which zenity)
+ if [ "$tmpstr" == "" ]
+ then
+  apt update && apt install zenity
+ fi
+ tmpstr=$(which pv)
+ if [ "$tmpstr" == "" ]
+ then
+  apt update && apt install pv
+ fi
+ tmpstr=$(which partprobe)
+ if [ "$tmpstr" == "" ]
+ then
+  apt update && apt install parted
+ fi
+
+ tmpstr=$(which expect)
+ if [ "$tmpstr" == "" ]
+ then
+  tmpst2=$(lsb_release -a|grep -im1 'buntu')
+  if [ "$tmpst2" != "" ]
+  then
+   add-apt-repository universe
+  fi
+  apt update && apt install expect
+ fi
+
+ tmpstr=$(which xterm)
+ if [ "$tmpstr" == "" ]
+ then
+  tmpst2=$(lsb_release -a|grep -im1 'buntu')
+  if [ "$tmpst2" != "" ]
+  then
+   add-apt-repository universe
+  fi
+  apt update && apt install xterm
+ fi
+
+ tmpstR=$(which mkfs.vfat)
+ tmpstS=$(which mkfs.exfat)
+ tmpstT=$(which mkfs.ntfs)
+ if [ "$tmpstR" == "" ] || [ "$tmpstS" == "" ] || [ "$tmpstT" == "" ]
+ then
+  tmpst2=$(lsb_release -a|grep -im1 'buntu')
+  if [ "$tmpst2" != "" ]
+  then
+   add-apt-repository universe
+  fi
+  apt update && apt install dosfstools ntfs-3g exfat-fuse
+  LANG=C apt-cache policy exfat-utils | grep -q '\*\*\*'
+  if [ $? -eq 0 ]
+  then
+   apt install exfat-utils
+  fi
+  LANG=C apt-cache policy exfatprogs | grep -q '\*\*\*'
+  if [ $? -eq 0 ]
+  then
+   apt install exfatprogs
+  fi
+ fi
+
+elif [ "$1" == "r" ] || [ "$1" == "-r" ]
+then
+ echo "removing mkusb-plug ..."
+ rm -i /usr/local/bin/{mkusb-plug,xorriso-dd-target,watch-flush}
+ rm -i /usr/local/sbin/{mkusb-sedd,mkusb-tow}
+ rm -i /usr/share/applications/mkusb-plug.desktop
+ rm -i /usr/share/mkusb/{plug-start,grub-win-ntfs-install.img.xz}
+ if test -f /usr/local/sbin/mkusb-minp
+ then
+  rm -i /usr/local/sbin/mkusb-minp
+ fi
+ if test -f /usr/local/bin/mkusb-plug-nox
+ then
+  rm -i /usr/local/bin/mkusb-plug-nox
+ fi
+fi
+

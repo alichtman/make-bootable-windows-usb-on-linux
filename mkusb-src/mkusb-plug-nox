@@ -1,0 +1,193 @@
+#!/bin/bash
+
+## Copyright 2019-2020 Nio Wiklund
+#
+# GPLv3: GNU GPL version 3
+# <http://gnu.org/licenses/gpl.html>.
+#
+# This is free software: you are free to change and redistribute it.
+# There is NO WARRANTY, to the extent permitted by law.
+#
+# Credit to the developer of xorriso-xx-target, Thomas Schmitt.
+#
+
+# date      editor   comment
+# 20191217  sudodus  created wrapper for plug-in method using
+#                    xorriso-dd-target to create input for mkusb-minp
+# 20191219  sudodus  added function test-tool
+# 20200118  sudodus  tips about mkusb-plug and mkusb-sedd in usage
+
+version=1.1.1
+
+inversvid="\0033[7m"
+resetvid="\0033[0m"
+greenback="\0033[1;37;42m"
+blueback="\0033[1;37;44m"
+redback="\0033[1;37;41m"
+violetback="\0033[1;37;45m"
+
+safetybelt="${0##*/} helps you make a USB drive or memory card bootable in a safe way"
+str="---------------------------------------------------------------"
+
+########################################################################
+
+function usage {
+
+ echo "$safetybelt"
+ echo "with a plug-in method using xorriso-dd-target creating input for mkusb-minp"
+ echo ""
+ echo "Usage:     $0 <source file>"
+ echo "Examples:  $0 ubuntu.iso"
+ echo "           $0 debian.iso"
+ echo "           $0 myfile.img"
+ echo "Version: $version"
+ echo "-------------------------------------------------------------"
+ echo "Please consider using the following tools with more features"
+ echo "'mkusb-plug' works with a zenity GUI and calls mkusb-sedd"
+ echo "'mkusb-sedd' works with and without GUI (replaces mkusb-minp)"
+ exit 1
+}
+########################################################################
+
+function test_tool {
+
+# test-tool [sudo] program-name
+
+if [ "$1" == "sudo" ]
+then
+ shift
+ sstr="s"
+ tmpstr=$(sudo which "$1")
+ if [ "tmpstr" == "" ]
+ then
+  exit
+ fi
+else
+ sstr=
+ tmpstr=$(which "$1")
+fi
+
+if [ "$tmpstr" == "" ]
+then
+ echo -e "$redback '$1' not in PATH $resetvid
+Please consider installing it and/or copy it into '/usr/local/${sstr}bin'"
+ exit
+fi
+}
+########################################################################
+
+#     main
+
+########################################################################
+
+if [ $# -ne 1 ] || ! test -f "$1" || ! test -s "$1"
+then
+ usage
+fi
+
+safetybelt="$inversvid $safetybelt $resetvid"
+echo -e "$safetybelt"
+
+test_tool sudo xorriso-dd-target
+test_tool mkusb-minp
+
+#tmp1=$(mktemp)
+
+echo "Starting with a plug in test to identify the target drive using"
+echo "xorriso-dd-target -plug_test and -list_long"
+echo "$str"
+
+# xorriso-dd-target -with_sudo -plug_test, -list_long, -look_for_iso
+
+read -p "Does your drive contain filesystems other than VFAT and ISO 9660?
+Answer Yes or No or Dunno (y/n/D) " ans
+if [ "${ans}" != "n" ]
+then
+  read -p "Does the drive contain an ISO 9660 filesystem?
+Answer Yes or No or Dunno (y/n/D) " an2
+  if [ "${an2}" == "y" ]
+  then
+    tmpstr=$(xorriso-dd-target -with_sudo -plug_test -look_for_iso |tee | head -n1)
+  else
+    tmpstr=$(xorriso-dd-target -with_sudo -plug_test |tee | head -n1)
+  fi
+else
+  tmpstr=$(xorriso-dd-target -with_sudo -plug_test |tee | head -n1)
+fi
+
+if [ "$tmpstr" == "" ]
+then
+ echo -e "$redback Plug in test failed $resetvid"
+ echo -e "This method is designed for $blueback removable $resetvid devices."
+ echo "Please try again, plug in a drive according to the advice!"
+ exit
+fi
+echo "${tmpstr}"
+target=${tmpstr%% *}
+echo "$str"
+sudo lsblk -o name,size,fstype,tran,label,model /dev/"${target}" | sed 's/ *$//'
+advice=$(<<<"$tmpstr" cut -d : -f 2)
+
+# user friendly(?) evaluation
+
+if [ "${advice/YES}" != "$advice" ]
+then
+ echo -e "$blueback $advice this drive looks like a safe target $resetvid"
+ echo -e "$blueback  Please double-check anyway :-) $resetvid"
+else
+ echo -e "$redback $advice this drive does NOT look like a safe target $resetvid"
+ echo -e "$redback  Please think twice before using this drive :-/ $resetvid"
+fi
+
+read -p "Is this the target device you want to use? (y/N) " ans 
+if [ "${ans^^}" != "Y" ]
+then
+ exit
+fi
+
+# preparing for mkusb-minp
+
+lng0=$LANG
+lca0=$LC_ALL
+LANG=C
+LC_ALL=C
+tmpstr=$(LANG=C grep -m1 'version=' $(which mkusb-minp))
+if [ "${tmpstr}" == "" ]
+then
+ echo "${0##*/} needs mkusb-minp but it is not found"
+ exit
+elif [ "${tmpstr}" \< "version=2.5" ]
+then
+ o1=
+ echo -e "$violetback There is a newer version of mkusb-minp $resetvid"
+else
+ o1="-b"
+fi
+LANG="$lng0"
+LC_ALL="$lca0"
+
+cmd2="/dev/${target}"
+
+ans=
+while [ "$ans" == "" ]
+do
+ read -p "Select Cloning, No-persistent, Persistent live or Quit (c/n/p/q) " ans
+ if [ "${ans}" == "c" ]
+ then
+  echo "sudo mkusb-minp  $o1 '$1'  $cmd2"
+        sudo mkusb-minp  $o1 "$1" "$cmd2"
+ elif [ "${ans}" == "n" ]
+ then
+  echo "sudo mkusb-minp -n $o1 '$1'  $cmd2"
+        sudo mkusb-minp -n $o1 "$1" "$cmd2"
+ elif [ "${ans}" == "p" ]
+ then
+  echo "sudo mkusb-minp -p $o1 '$1'  $cmd2"
+        sudo mkusb-minp -p $o1 "$1" "$cmd2"
+ elif [ "${ans}" == "q" ]
+ then
+  exit
+ else
+  ans=
+ fi
+done

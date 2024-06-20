@@ -1,0 +1,21 @@
+#!/bin/bash
+
+resetvid="\0033[0m"
+logoansi="\0033[38;5;0;48;5;148m"
+
+starttxt="$logoansi mkusb-plug - Do USB Stuff $resetvid
+mkusb-plug needs superuser permissions (sudo) for some tasks,
+in order to prepare and write to the target, a block device."
+endtext="$logoansi Press Enter to exit $resetvid"
+
+xterm -geometry 50x1 -title "graphic mode" -e sleep 1 2> /dev/null
+if [ $? -ne 0 ]
+then
+ echo "***** mkusb-start: Please run a GUI and install xterm and zenity *****"
+ echo "*****              or use mkusb-nox or dus (mkusb-dus or guidus) *****"
+ exit
+fi
+
+xterm -title "mkusb-plug console - Do USB Stuff" -fa default -fs 10 \
+ -bg '#2b2c2b' -fg '#f0f0f0' -sb -rightbar \
+ -e bash -c "echo -e \"$starttxt\"; mkusb-plug \"$1\"; echo -en \"$endtext\"; read"

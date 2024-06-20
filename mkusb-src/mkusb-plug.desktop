@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Categories=Application;System;
+Type=Application
+Name=mkusb-plug
+Comment=Install system to mass storage device, typically USB pendrive
+Exec=/usr/share/mkusb/plug-start %f
+Icon=mkusb
+Terminal=false
+StartupNotify=false

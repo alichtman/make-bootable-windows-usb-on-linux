@@ -1,0 +1,1014 @@
+#! /bin/bash
+
+#-----------------------------------------------------------------------------
+#
+## Copyright 2017-2020 Nio Wiklund
+#
+# GPLv3: GNU GPL version 3
+# <http://gnu.org/licenses/gpl.html>.
+#
+# This is free software: you are free to change and redistribute it.
+# There is NO WARRANTY, to the extent permitted by law.
+
+# date        editor   comment
+# 2016-02-26  sudodus  created from mk_mkdos in mkusb
+# 2017-12-17  sudodus  converted to clone-to-pendrive
+# 2017-12-17  sudodus  checking for mass storage devices as target
+# 2017-12-18  sudodus  error output to help correct usage
+# 2019-10-08  sudodus  creating persistence for Ubuntu 19.10 & Debian 10
+# 2019-10-09  sudodus  seek last partition; grep ... 2> /dev/null
+# 2019-10-10  sudodus  function prober and other tweaks with partprobe
+# 2019-11-14  sudodus  'nopersistent' for fully non-persistent live drive
+# 2019-12-14  sudodus  bugfix in main for targ_dev=; minor fix in srctst
+# ----------------------------------------------------------------------
+# 2019-12-17  sudodus  added option -b brief, don't list all drives
+# 2019-12-22  sudodus  added options --puer --pder --nper --cloner
+# 2019-12-29  sudodus  function datp for options --vfat --exfat --ntfs
+# 2020-01-11  sudodus  moved sleep to get 'failed' output without mkfs.*
+# ----------------------------------------------------------------------
+# 2020-01-17  sudodus  forked mkusb-sedd; mkusb-minp left at 2019-12-14
+#                      improved feedback during processing with dd and sed
+#                      version 2.4 matching that of the current mkusb-plug
+# 2020-01-25  sudodus  prober: max delay 15*4 s to 4,5,6....,14 = 99 s
+#                      usage: avoid printing loop devices (for snaps)
+# 2020-02-13  sudodus  sort output of lsblk to identify 'last partition'
+#                      to make mkusb-sedd work in Ubuntu 16.04.x LTS
+#                      edits to make variable sucuess work as expected
+#                      test_host: check for dd version
+#                      with status=progress and check for lsblk
+# 2020-03-03  sudodus  puer: select label depending on Ubuntu version
+# 2020-03-20  sudodus  dd_do: removed sudo which was not necessary
+#                      main: error output and 'usage' if bad target
+# 2020-03-22  sudodus  several fixes to make things work in systems like
+#                      xubuntu focal, that automatically mounts partitions
+#                      they are created and after partprobe
+# 2020-05-03  sudodus  puer: relies on automatic creation of partition for
+#                      persistence by Ubuntu (faster and more robust now)
+#                      improved identification of version number
+#                      p_checkpoint: 'Are you sure?' added in text mode
+# 2020-09-23  sudodus  puer, puer0: Workaround because of bug:
+#                      https://bugs.launchpad.net/bugs/1895329
+# 2020-10-03  sudodus  puer: "might fail - continue anyway?" when iso file
+#                      not identified as suitable Ubuntu version.
+# 2020-10-19  sudodus  puer, puer0: Workaround reverted (bug-fix for
+#                      https://bugs.launchpad.net/bugs/1895329)
+# 2020-10-21  sudodus  new functions gpt_fix, gpt_zap
+#                      datp: using gpt_fix, gpt_zap (and partprobe)
+# 2021-07-28  sudodus  puer: identify new versions of Ubuntu (.disk/info)
+#                      and some minor cosmetic tweaks
+# 2021-11-22  sudodus  quoted grep 'patterns'
+
+version=2.8.6
+
+# global variables
+
+progname="${0##*/}"
+inversvid="\0033[7m"
+faintvid="\0033[2m"
+resetvid="\0033[0m"
+greenback="\0033[1;37;42m"
+blueback="\0033[1;37;44m"
+redback="\0033[1;37;41m"
+safetybelt="$progname makes it safer to create a boot drive"
+safetybelt="$inversvid-------- $safetybelt --------$resetvid"
+brief=false
+persistent=false
+nopersist=false
+pd=false         # persistent debian
+pu=false         # persistent ubuntu
+uver=
+label=
+verfail=false
+task=
+source=
+target=
+trgtxt=
+partn0=
+partnr=
+success=true
+manager=
+bar="--------------------------------------------------------------------------------"
+
+#######################################################################
+
+function cloner {
+
+echo -e "                $inversvid ***** cloner ***** $resetvid"
+echo "Trying to unmount partitions if mounted on the target device"
+umount "$target"*
+df | grep "$target"
+if [ $? -eq 0 ]
+then
+ echo -e "$redback cloner: could not unmount a partition on the target device $resetvid"
+ exit
+fi
+echo "$bar"
+echo -e "$inversvid Please wait until the cloning has finished and 'Done' is written $resetvid"
+
+dd_do
+}
+########################################################################
+
+function nper {
+
+echo -e "         $inversvid ***** nper: no persistence at all for Ubuntu ***** $resetvid"
+
+echo "Trying to unmount partitions if mounted on the target device"
+umount "$target"*
+df | grep "$target"
+if [ $? -eq 0 ]
+then
+ echo -e "$redback nper: could not unmount a partition on the target device $resetvid"
+ exit
+fi
+echo "$bar"
+echo -e "$inversvid Please wait until the process has finished and 'Done' is written $resetvid"
+
+echo "..... Flash modified iso file to target ........................................"
+
+sed_do
+}
+########################################################################
+
+function puer {
+
+echo -e "         $inversvid ***** puer: Persistence for Ubuntu ***** $resetvid"
+
+echo "Trying to unmount partitions if mounted on the target device"
+umount "$target"*
+df | grep "$target"
+if [ $? -eq 0 ]
+then
+ echo -e "$redback puer: could not unmount a partition on the target device $resetvid"
+ exit
+fi
+
+echo "..... Check version of ubuntu .................................................."
+
+lp1=$(mktemp -d)
+sudo mount -o loop "$source" "$lp1"
+if [ $? -ne 0 ]
+then
+ /bin/echo -e "$redback Loop mount of source file failed $resetvid"
+else
+ grep -i 'DISKNAME' "$lp1/README.diskdefines" 2> /dev/null |grep 'buntu'
+ if [ $? -ne 0 ]
+ then
+  uver=$(grep -om1 '[1-9][0-9]\.[01][04]' "$lp1/.disk/info")
+ fi
+ if [ $? -eq 0 ] || [ "$uver" != "" ]
+ then
+  pu=true
+  uver=$(grep 'DISKNAME' "$lp1/README.diskdefines"|grep 'buntu'|grep -o '[0-9][0-9]\.[0-9][0-9]')
+  if [ "$uver" = "" ]
+  then
+   uver=$(grep -om1 '[1-9][0-9]\.[01][04]' "$lp1/.disk/info")
+  fi
+  if [ $? -eq 0 ] || [ "$uver" != "" ]
+  then
+   /bin/echo -e "$blueback Ubuntu or an Ubuntu family flavour $resetvid"
+#   echo "$uver"
+   if [ "$uver" = "" ]
+   then
+    uver="not found"
+   elif test "$uver" \= "19.10"
+   then
+    label="casper-rw"
+   elif test "$uver" \> "19.10"
+   then
+    label="writable"
+   fi
+   echo "*** Ubuntu version $uver ***"
+  fi
+ fi
+fi
+
+umount "$lp1"
+rmdir "$lp1"
+if [ "$label" == "" ]
+then
+ echo -e "$redback puer: might fail to create persistence for this iso file $resetvid"
+ echo -en " Do you want to continue anyway? (y/N) "
+  read ans
+  if [ "$ans" != "y" ]
+  then
+   exit
+  fi
+fi
+
+echo "$bar"
+echo -e "$inversvid Please wait until the process has finished and 'Done' is written $resetvid"
+
+echo "..... Flash modified iso file to target ........................................"
+
+#echo "puer: uver=$uver, label=$label, debugging exit" ######
+#exit #####
+
+sed_do
+
+message="A partition for persistence with the label '$label' will be
+ created automatically, when you boot into the target drive."
+if [ "$manager" == "z" ]
+then
+ zenity --info --text="$message" --title="$version - '$label' partition later, not now" \
+  --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+  --width=600 --height=120 2> /dev/null
+fi
+ echo -e "$blueback
+ $message $resetvid"
+}
+########################################################################
+
+function puer0 {
+
+echo -e "         $inversvid ***** puer0: Persistence for Ubuntu ***** $resetvid"
+
+echo "Trying to unmount partitions if mounted on the target device"
+umount "$target"*
+df | grep "$target"
+if [ $? -eq 0 ]
+then
+ echo -e "$redback puer: could not unmount a partition on the target device $resetvid"
+ exit
+fi
+
+echo "..... Check version of ubuntu .................................................."
+
+lp1=$(mktemp -d)
+sudo mount -o loop "$source" "$lp1"
+if [ $? -ne 0 ]
+then
+ /bin/echo -e "$redback Loop mount of source file failed $resetvid"
+else
+ grep -i 'DISKNAME' "$lp1/README.diskdefines" 2> /dev/null |grep 'buntu'
+ if [ $? -eq 0 ]
+ then
+  pu=true
+#  uver=$(grep DISKNAME "$lp1/README.diskdefines"|grep buntu|tr -s ' ' '\t'|cut -f 4)
+  uver=$(grep 'DISKNAME' "$lp1/README.diskdefines"|grep 'buntu'|grep -o '[0-9][0-9]\.[0-9][0-9]')
+  if [ $? -eq 0 ]
+  then
+   /bin/echo -e "$blueback Ubuntu or an Ubuntu family flavour $resetvid"
+#   echo "$uver"
+   if [ "$uver" = "" ]
+   then
+    echo "*** Ubuntu version not found ***"  
+   elif test "$uver" \< "19.10"
+   then
+    echo "*** Ubuntu version $uver ***"
+   elif test "$uver" \= "19.10"
+   then
+    label="casper-rw"
+   elif test "$uver" \> "19.10"
+   then
+    label="writable"
+   fi
+  fi
+ fi
+fi
+umount "$lp1"
+rmdir "$lp1"
+if [ "$label" == "" ]
+then
+ echo -e "$redback puer: cannot create persistence for this version $resetvid"
+ exit
+else
+ echo "label '$label' on partition for persistence"
+fi
+
+echo "$bar"
+echo -e "$inversvid Please wait until the process has finished and 'Done' is written $resetvid"
+
+echo "..... Flash modified iso file to target ........................................"
+
+sed_do
+
+sleep 4
+partprobe 2> /dev/null
+sleep 4
+partn0=/dev/$(lsblk -lno name "${target}" | sort | tail -n1)
+#echo "$partn0 after flashing"
+
+echo "..... Create partition for persistence ........................................."
+
+echo 'n
+p
+
+
+
+w' | fdisk "${target}"
+sleep 4
+sync
+sleep 4
+prober
+
+if ! test -b "$partnr"
+then
+ echo "The target's partition $partnr not found"
+ exit
+fi
+
+echo "..... Overwrite first mibibyte of partition for persistence ...................."
+
+umount "$target"*
+dd if=/dev/zero of="$partnr" bs=1024 count=1024
+sleep 6
+sync
+partprobe 2> /dev/null
+sleep 4
+umount "$target"*
+
+echo "..... Create file system in partition for persistence .........................."
+
+mkfs.ext2 -L "$label" "$partnr"
+if [ $? -ne 0 ]
+then
+  echo -e "$redback puer: cannot create 'ext' file system $resetvid"
+  success=false
+fi
+sleep 2
+}
+########################################################################
+
+function pder {
+
+echo -e "         $inversvid ***** pder: Persistence for Debian ***** $resetvid"
+
+echo "Trying to unmount partitions if mounted on the target device"
+umount "$target"*
+df | grep "$target"
+if [ $? -eq 0 ]
+then
+ echo -e "$redback pder: could not unmount a partition on the target device $resetvid"
+ exit
+fi
+echo "$bar"
+echo -e "$inversvid Please wait until the process has finished and 'Done' is written $resetvid"
+
+echo "..... Flash modified iso file to target ........................................"
+
+sed_do
+
+sleep 4
+partprobe 2> /dev/null
+sleep 4
+partn0=/dev/$(lsblk -lno name "${target}" | sort | tail -n1)
+#echo "$partn0 after flashing"
+
+echo "..... Create partition for persistence ........................................."
+
+echo 'n
+p
+
+
+
+w' | fdisk "${target}"
+sleep 4
+sync
+sleep 4
+prober
+
+partnr=/dev/$(lsblk -lno name "${target}" | sort | tail -n1)
+if ! test -b "$partnr"
+then
+ echo "The target's partition $partnr not found"
+ exit
+fi
+
+echo "..... Overwrite first mibibyte of partition for persistence ...................."
+
+umount "$target"*
+dd if=/dev/zero of="$partnr" bs=1024 count=1024
+sleep 4
+sync
+partprobe 2> /dev/null
+sleep 4
+umount "$target"*
+
+echo "..... Create file system in partition for persistence .........................."
+
+mkfs.ext2 -L persistence "$partnr"
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+sleep 2
+sync
+sleep 4
+
+lp1=$(mktemp -d)
+
+echo "..... Write 'persistence.conf' ................................................."
+
+mount "$partnr" "$lp1"
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+echo '/ union' > "$lp1"/persistence.conf
+sync
+umount "$lp1"
+sleep 2
+rm -r "$lp1"
+}
+########################################################################
+
+function datp {
+
+echo -e "         $inversvid ***** datp: live with $1 data partition ***** $resetvid"
+
+echo "Trying to unmount partitions if mounted on the target device"
+umount "$target"*
+df | grep "$target"
+if [ $? -eq 0 ]
+then
+ echo -e "$redback datp: could not unmount a partition on the target device $resetvid"
+ exit
+fi
+gpt_zap "$target"
+echo "$bar"
+echo -e "$inversvid Please wait until the process has finished and 'Done' is written $resetvid"
+
+echo "..... Flash modified iso file to target ........................................"
+
+dd_do
+
+sleep 4
+partn0=/dev/$(lsblk -lno name "${target}" | sort | tail -n1)
+echo "$partn0 after flashing"
+partprobe
+echo "gpt_fix ..."
+gpt_fix "$target"
+sleep 4
+partprobe
+
+echo "..... Create partition ........................................................."
+
+echo 'n
+p
+
+
+
+w' | fdisk "${target}"
+sleep 4
+sync
+sleep 4
+prober
+
+if ! test -b "$partnr"
+then
+ echo "The target's partition $partnr not found"
+ exit
+fi
+
+echo "..... Overwrite first mibibyte of partition ...................................."
+
+umount "$target"*
+dd if=/dev/zero of="$partnr" bs=1024 count=1024
+sleep 4
+sync
+partprobe 2> /dev/null
+sleep 4
+
+echo "..... Create file system in usbdata partition  ................................."
+
+if [ "$1" == "ntfs" ]
+then
+ mkfs.ntfs -f -L usbdata "$partnr"
+elif [ "$1" == "vfat" ] || [ "$1" == "exfat" ]
+then
+ mkfs."$1" -n USBDATA "$partnr"
+else
+ echo "datp: bad parameter='$1'"
+ success=false
+fi
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+sleep 2
+}
+########################################################################
+
+function prober {
+
+pcnt=0
+partnr=/dev/$(lsblk -lno name "${target}" | sort | tail -n1)
+while [ "$partnr" == "$partn0" ]
+do
+ if [ $pcnt -gt 10 ]
+ then
+  echo -e "$redback prober: cannot identify new partition made by fdisk $resetvid"
+  echo -e "$redback This can sometimes be fixed via two steps $resetvid"
+  echo -e "$redback 1. wipe the first mibibyte with mkusb-dus $resetvid"
+  echo -e "$redback 2. unplug and replug the target drive.    $resetvid"
+  echo -e "$redback Sometimes, if the drive is getting slow,  $resetvid"
+  echo -e "$redback you need to wipe the whole target drive,  $resetvid"
+  echo -e "$redback or reboot the computer to make this work. $resetvid"
+  exit
+ elif  [ $pcnt -gt 8 ]
+ then
+  echo -en "$redback Please unplug and replug the target drive, $resetvid
+$trgtxt
+$redback and then press the Enter key to continue $resetvid"
+  read
+  sleep 4
+  umount "${target}*" 2> /dev/null
+ fi
+ partprobe 2> /dev/null
+ delay=$(( 4 + pcnt ))
+ sleep "$delay"
+ pcnt=$((pcnt + 1))
+ partnr=/dev/$(lsblk -lno name "${target}" | sort | tail -n1)
+ echo "prober: $partnr for persistence"
+done
+}
+########################################################################
+
+function p_checkpoint {
+
+# $text string with high-lights
+
+ ans=
+ q_chk="Final checkpoint, go ahead?"
+ q_ch2="Final checkpoint:
+are you ready?"
+  
+ echo -e "$1"
+ action="${1/\\*7m}"
+ action="${action/\\*0m}"
+ action=$(echo "$action"|sed "s#^'/.*/#'#")
+ tolist=$(lsblk -lo MODEL,NAME,FSTYPE,LABEL,SIZE "$target")
+ <<<"$tolist" head -n2
+ <<<"$tolist" tail -n+3 | sort
+ trgtxt=$(lsblk -o NAME,SIZE,MODEL -d "$target")
+ trgtx1=$(echo "$trgtxt"|head -n1)
+ trgtx2=$(echo "$trgtxt"|tail -n1)
+ trgtxt="${trgtxt,,}"
+ if [ "$manager" == "z" ]
+ then
+  ans=$(zenity --list --radiolist \
+  --width=$(($wadd+960)) --height=$(($hadd+320)) \
+  --title="$version - $q_chk" --cancel-label="Stop" --ok-label="Go" \
+  --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png" \
+  --column="Go/Stop" --column="$action" --column="$trgtxt"\
+  true Stop "No, I am not sure yet" \
+  false Go  "Yes, I want to go ahead" \
+  2> /dev/null)
+  if [ $? -ne 0 ]
+  then
+   ans=n
+  fi
+ elif [ "$manager" == "d" ]
+ then
+  action="$trgtx1\n$trgtx2\n$action\n\Z1***** $q_chk *****\Zn"
+  ans=$(dialog --no-collapse \
+ --backtitle "$version - $q_chk" \
+ --cancel-label "Stop" --ok-label "Go" --colors \
+ --defaultno \
+ --radiolist "$action" 0 0 0 \
+ Stop "\Z1No, I am not sure yet\Zn" on \
+ Go   "Yes, I want to go ahead" off \
+ 3>&1 1>&2 2>&3 3>&-)
+  if [ $? -ne 0 ]
+  then
+   ans=n
+  fi
+ else
+  echo -en "$redback $q_chk (g/N) $resetvid"
+  read ans
+  if [ "$ans" == "g" ]
+  then
+   echo -en "$redback Are you sure ? (y/N) $resetvid"
+   read an2
+   if [ "$an2" != "y" ]
+   then
+    return 1
+   fi
+  fi
+ fi
+ 
+ if [ "$ans" == "Go" ]
+ then
+  ans=g
+ elif [ "$ans" == "Stop" ]
+ then
+  ans=n
+ fi
+ if [ "$ans" == "g" ]
+ then
+  return 0
+ else
+  if [ "$manager" == "z" ]
+  then
+   src_orig=
+  fi
+  return 1
+ fi
+}
+#######################################################################
+
+function p_zentest {
+
+zenity --info --title="$version - zenity-test" --timeout 1 \
+ --width=350 --height=150 \
+--text="Checking if zenity works in this environment" > /dev/null 2>&1
+exitnr=$?
+if [ $exitnr -eq 0 ] || [ $exitnr -eq 5 ]
+then
+ manager=z
+else
+ return 1
+fi
+}
+########################################################################
+
+function dd_prep {
+
+size=$(wc -c "$source")
+size=${size%% *}
+
+if [ "$manager" == "z" ]
+then
+ tailfile=$(mktemp)
+ tmpfile=$(mktemp)
+
+ ( while true;
+ do
+  sleep 2
+  tmpline=$(tr '\015' '\n' < "$tmpfile" | tail -n1)
+  tmpstr=${tmpline%% *}
+  tproc=$(((100*tmpstr+50)/size))
+  echo "$tproc
+# $tmpline" >> "$tailfile"
+ done ) & pid1=$!
+
+ ( tail -f "$tailfile"| zenity --progress --title="$version - progress ..." \
+ --width=500 --height=400 \
+ --percentage=0 --auto-close --no-cancel \
+ --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png"  2>> "/dev/null") & pid2=$!
+fi
+}
+########################################################################
+
+function dd_do {
+
+dd_prep
+echo "$size=file size"
+
+if [ "$manager" == "z" ]
+then
+ dd if="$source" of="$target" bs=1M status=progress oflag=dsync 2> >(tee "$tmpfile")
+else
+ dd if="$source" of="$target" bs=1M status=progress oflag=dsync
+fi
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+
+dd_cleanup
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+}
+########################################################################
+
+function dd_cleanup {
+
+if [ "$manager" == "z" ]
+then
+ echo -en "$faintvid"
+ echo "----- cleanup after dd ------------------------------------------"
+ sync
+ echo "100
+ # buffered data : 0 kB -- watching -- rate : 0 -- eta : n.a." >> "$tailfile"
+ sleep 5.5
+ ps -A|grep "^ *$pid1"
+ if [ $? -eq 0 ]
+ then
+  kill "$pid1"
+ fi
+ ps -A|grep "^ *$pid2"
+ if [ $? -eq 0 ]
+ then
+  kill "$pid2"
+ fi
+ rm  "$tmpfile" "$tailfile"
+# sleep 4
+ partprobe
+# sleep 2
+ echo -en "$resetvid"
+fi
+}
+########################################################################
+
+function sed_prep {
+
+size=$(wc -c "$source")
+size=${size%% *}
+tailfile=$(mktemp)
+cmdfile=$(mktemp)
+if [ "$manager" == "z" ]
+then
+ ( watch-flush "$size" "$tailfile" > /dev/null ) & pid0=$!
+
+ ( tail -f "$tailfile"| zenity --progress --title="$version - progress ..." \
+ --width=500 --height=400 \
+ --percentage=0 --auto-close --no-cancel \
+ --window-icon="/usr/share/icons/hicolor/48x48/apps/mkusb.png"  2>> "/dev/null") & pid2=$!
+else
+ ( watch-flush "$size" "$tailfile" ) & pid0=$!
+fi
+}
+########################################################################
+
+function sed_do {
+
+if [ "$task" == "--puer" ]
+then
+ persist="persistent  "
+elif [ "$task" == "--pder" ]
+then
+ persist="persistence "
+elif [ "$task" == "--nper" ]
+then
+ persist="nopersistent"
+else
+ echo "sed_do: error"
+ exit 1
+fi
+sed_prep
+which pv > /dev/null
+if [ $? -eq 0 ] && [ "$manager" == "z" ]
+then
+ pv "$source" | sed -e "s/quiet splash/$persist/" -e "s/splash quiet/$persist/" > "$target"
+else
+ < "$source" sed -e "s/quiet splash/$persist/" -e "s/splash quiet/$persist/" > "$target"
+fi
+if [ $? -ne 0 ]
+then
+ success=false
+fi
+sleep 2
+sed_cleanup
+}
+########################################################################
+
+function sed_cleanup {
+
+echo -en "$faintvid"
+echo "
+----- cleanup after sed -----------------------------------------"
+sync
+echo "100
+# buffered data : 0 kB -- watching -- rate : 0 -- eta : n.a." >> "$tailfile"
+sleep 5.5
+ps -A|grep "^ *$pid0"
+if [ $? -eq 0 ]
+then
+ kill "$pid0"
+fi
+if [ "$manager" == "z" ]
+then
+ ps -A|grep "^ *$pid2"
+ if [ $? -eq 0 ]
+ then
+  kill "$pid2"
+ fi
+fi
+rm "$cmdfile" "$tailfile"
+echo -en "$resetvid"
+}
+########################################################################
+
+function final_tasks {
+
+sleep 2
+sync
+ 
+if [ "${target/mmc}" != "$target" ]
+then
+ read -p "Press Enter to continue, when you have unplugged the target device '$target'
+and maybe have plugged it back again"
+else
+ echo "Finally, please wait for a few more seconds ..."
+fi
+sleep 1
+partprobe 2> /dev/null
+sleep 10
+umount "$target"* 2> /dev/null
+echo "$bar"
+tolist=$(lsblk -lo NAME,MODEL,FSTYPE,LABEL,MOUNTPOINT,SIZE,NAME "$target")
+<<<"$tolist" head -n2
+<<<"$tolist" tail -n+3 | sort
+if $success
+then
+ /bin/echo -e "$greenback Done :-) $resetvid"
+else
+ /bin/echo -e "$redback failed :-( $resetvid"
+fi
+}
+########################################################################
+
+function gpt_fix {
+
+# $1 is the target device
+
+echo \
+"v
+q" \
+| gdisk "$1" 2>/dev/null |grep -e 'GPT: damaged' -e 'Problem:' > /dev/null 2>&1
+if [ $? -eq 0 ]
+then
+ echo \
+"v
+x
+e
+r
+d
+w
+y" \
+| gdisk "$1" > /dev/null 2>&1
+
+ echo \
+"v
+q" \
+| gdisk "$1" 2>/dev/null |grep -e 'GPT: damaged' -e 'Problem:' > /dev/null 2>&1
+ if [ $? -eq 0 ]
+ then
+  echo "gpt_fix: failed to fix the GUID partition table (GPT) of $1"
+ else
+  echo "gpt_fix: done :-)"
+ fi
+else
+ echo "gpt_fix: checked :-)"
+fi
+}
+########################################################################
+
+function gpt_zap {
+
+# $1 is the target device
+
+echo \
+"
+x
+z
+y
+y" \
+| gdisk "$1" > /dev/null 2>&1
+
+echo "gpt_zap: done"
+}
+########################################################################
+
+function usage {
+
+ /bin/echo -e "$safetybelt"
+ echo "Clone from iso or image file to target device (e.g. USB pendrive)"
+ which pv > /dev/null
+ if [ $? -ne 0 ]
+ then
+  echo "You may want to install 'pv' (progress view)"
+ fi
+ echo "Usage:"
+ /bin/echo -e "$inversvid sudo /path/${0##*/} --<task> <source file> <target device> $resetvid"
+ echo "Cloning:"
+ echo " sudo $progname --cloner file.iso /dev/sdx  # cloning standard live"
+ echo " sudo $progname --cloner file.img /dev/sdx  # cloning general image"
+ echo " sudo $progname --vfat   file.iso /dev/sdx  # cloning with FAT32 usbdata"
+ echo " sudo $progname --exfat  file.iso /dev/sdx  # cloning with exFAT usbdata"
+ echo " sudo $progname --ntfs   file.iso /dev/sdx  # cloning with NTFS  usbdata"
+ echo "Special tasks for Ubuntu 19.10+ and Debian 10+"
+ echo " sudo $progname --puer ubuntu.iso /dev/sdx  # persistent live drive"  
+ echo " sudo $progname --pder debian.iso /dev/sdx  # persistent live drive"  
+ echo " sudo $progname --nper ubuntu.iso /dev/sdx  # live-only drive"  
+ read -p "Press the Enter key to continue"
+ echo "Help:"
+ echo "$progname -h"
+ echo "Version:"
+ echo "$progname -v"
+ /bin/echo -e "${inversvid}Available devices $resetvid"
+ lsblk -do name,size,tran,model | \
+  grep -v -e 'sr[0-9]' -e 'fd[0-9]' -e 'zram[0-9]' -e 'loop[0-9]'
+ exit
+}
+########################################################################
+
+function test_host {
+
+LANG=C lsblk > /dev/null
+if [ $? -ne 0 ]
+then
+ echo -e "$redback This operating system is too old, there is no 'lsblk' $resetvid"
+ lsb_release -a 2> /dev/null
+ echo -e "$redback Try mkusb-bas $resetvid"
+ exit 1
+fi
+LANG=C dd --help|grep 'progress.*stat' > /dev/null
+if [ $? -ne 0 ]
+then
+ echo -e "$redback This operating system is too old for how '$progname' uses 'dd' $resetvid"
+ lsb_release -a 2> /dev/null
+ echo -e "$redback Try mkusb version 12 alias mkusb-dus or mkusb-minp $resetvid"
+ exit 1
+fi
+}
+########################################################################
+#
+# main program
+#
+########################################################################
+
+# print version and help text on demand
+
+if [ "$1" == "-v" ]
+then
+ echo "$progname version $version"
+ exit
+elif [ "$1" == "-h" ]
+then
+ usage
+elif [ "$(whoami)" != "root" ]
+then
+ /bin/echo -e "$redback Run '${0##*/}' with sudo or as root $resetvid"
+ usage
+fi 
+
+test_host
+
+# task specified with --option
+
+if [ "${1:0:2}" == "--" ] && [ $# -eq 3 ]
+then
+ task="$1"
+ source="$2"
+ target="$3"
+ echo "         task: '$task'"
+ echo "  source file: '$source'"
+ echo "target device:  $target"
+ version="$progname $version"
+
+# check target device and source file
+
+ if test -b "$target"
+ then
+  leng=${#target}
+  leng1=$((leng - 1))
+  trunk=${target:0:leng1}
+  leng2=$((leng - 2))
+  trun2=${target:0:leng2}
+ else
+  /bin/echo -e "$redback Bad target device $inversvid $target $resetvid"
+  usage
+ fi
+ if ! test -s "$source"
+ then
+  /bin/echo -e "$redback Bad source file $inversvid $source $resetvid"
+  usage
+ elif ! test -b "$target" || test -b "$trunk" || test -b "$trun2" 
+ then
+  /bin/echo -e "$redback Bad target device $inversvid $target $resetvid"
+  usage
+ fi
+
+ p_zentest
+ p_checkpoint
+ if [ $? -eq 0 ]
+ then
+  if [ "$task" == "--cloner" ]
+  then
+   cloner 
+  elif [ "$task" == "--nper" ]
+  then
+   nper
+  elif [ "$task" == "--puer" ]
+  then
+   puer
+  elif [ "$task" == "--pder" ]
+  then
+   pder
+  elif [ "$task" == "--vfat" ]
+  then
+   datp vfat
+  elif [ "$task" == "--exfat" ]
+  then
+   datp exfat
+  elif [ "$task" == "--ntfs" ]
+  then
+   datp ntfs
+  else
+   echo -e "$redback no task '$' $resetvid"
+   exit 1
+  fi
+  final_tasks
+ else
+  echo -e "$redback ${0##*/} terminated by user $resetvid"
+  exit 1
+ fi
+else
+ echo -e "$redback the first parameter should be --<task>  or -h or -v $resetvid"
+ usage
+fi
